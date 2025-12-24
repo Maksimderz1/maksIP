@@ -1,0 +1,118 @@
+import tkinter as tk
+from scapy.all import sniff, IP
+import subprocess
+import threading
+
+class NetWatcher:
+    def __init__(self, master):
+        self.master = master
+        master.title("NetWatcher")
+        master.configure(bg="#1e1e1e")
+
+        self.running = False
+        self.packets_total = 0
+        self.bytes_total = 0
+        self.ip_counter = {}
+        self.ip_bytes = {}
+
+        self.all_ips = set()
+        self.sus_ips = set()
+        self.blocked_ips = set()
+
+        # Статистика
+        stats_frame = tk.Frame(master, bg="#1e1e1e")
+        stats_frame.pack(pady=5)
+
+        tk.Label(stats_frame, text="Пакетов:", fg="white", bg="#1e1e1e").grid(row=0, column=0, sticky="w")
+        tk.Label(stats_frame, text="Байт:", fg="white", bg="#1e1e1e").grid(row=1, column=0, sticky="w")
+
+        self.label_pkts = tk.Label(stats_frame, text="0", fg="white", bg="#1e1e1e")
+        self.label_bytes = tk.Label(stats_frame, text="0", fg="white", bg="#1e1e1e")
+        self.label_pkts.grid(row=0, column=1, sticky="w")
+        self.label_bytes.grid(row=1, column=1, sticky="w")
+
+        # Listbox для IP
+        list_frame = tk.Frame(master, bg="#1e1e1e")
+        list_frame.pack(pady=5)
+
+        tk.Label(list_frame, text="Все IP", fg="white", bg="#1e1e1e").grid(row=0, column=0)
+        tk.Label(list_frame, text="Подозрительные", fg="white", bg="#1e1e1e").grid(row=0, column=1)
+        tk.Label(list_frame, text="Заблокированные", fg="white", bg="#1e1e1e").grid(row=0, column=2)
+
+        self.list_all = tk.Listbox(list_frame, width=30, height=12, bg="#2e2e2e", fg="white", selectbackground="#555555")
+        self.list_sus = tk.Listbox(list_frame, width=30, height=12, bg="#4e2e2e", fg="white", selectbackground="#555555", selectmode=tk.MULTIPLE)
+        self.list_blk = tk.Listbox(list_frame, width=30, height=12, bg="#2e4e2e", fg="white", selectbackground="#555555")
+
+        self.list_all.grid(row=1, column=0, padx=5)
+        self.list_sus.grid(row=1, column=1, padx=5)
+        self.list_blk.grid(row=1, column=2, padx=5)
+
+        # События клика (удаляем автоматическую блокировку по двойному клику)
+        self.list_blk.bind("<Double-Button-1>", self.unblock_selected_ip)
+
+        # Кнопки
+        btn_frame = tk.Frame(master, bg="#1e1e1e")
+        btn_frame.pack(pady=5)
+        tk.Button(btn_frame, text="Старт", command=self.start_sniff, bg="#555555", fg="white").grid(row=0, column=0, padx=5)
+        tk.Button(btn_frame, text="Блокировать выбранное", command=self.block_selected_ip, bg="#aa3333", fg="white").grid(row=0, column=1, padx=5)
+        tk.Button(btn_frame, text="Разблокировать выбранное", command=self.unblock_selected_ip, bg="#33aa33", fg="white").grid(row=0, column=2, padx=5)
+
+    def sniff_worker(self):
+        sniff(prn=self.process_packet, stop_filter=lambda p: not self.running)
+
+    def start_sniff(self):
+        if not self.running:
+            self.running = True
+            threading.Thread(target=self.sniff_worker, daemon=True).start()
+
+    def stop_sniff(self):
+        self.running = False
+
+    def process_packet(self, pkt):
+        if IP in pkt:
+            src = pkt[IP].src
+            pkt_len = len(pkt)
+
+            self.packets_total += 1
+            self.bytes_total += pkt_len
+
+            self.label_pkts.config(text=str(self.packets_total))
+            self.label_bytes.config(text=str(self.bytes_total))
+
+            # Счётчик пакетов и байт
+            self.ip_counter[src] = self.ip_counter.get(src, 0) + 1
+            self.ip_bytes[src] = self.ip_bytes.get(src, 0) + pkt_len
+
+            # Добавляем IP в общий список
+            if src not in self.all_ips:
+                self.all_ips.add(src)
+                self.list_all.insert(tk.END, src)
+
+            # Условие для подозрительных IP
+            
+            if (self.ip_counter[src] > 10 or self.ip_bytes[src] > 1000) and src not in self.sus_ips:
+                self.sus_ips.add(src)
+                display_text = f"{src} ({self.ip_counter[src]} pkt, {self.ip_bytes[src]} B)"
+                self.list_sus.insert(tk.END, display_text)
+
+    def block_selected_ip(self):
+        selections = self.list_sus.curselection()
+        for index in selections:
+            item = self.list_sus.get(index)
+            ip = item.split()[0] 
+            if ip not in self.blocked_ips:
+                subprocess.run(["sudo", "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"])
+                self.blocked_ips.add(ip)
+                self.list_blk.insert(tk.END, ip)
+
+    def unblock_selected_ip(self, event=None):
+        selections = self.list_blk.curselection()
+        for index in reversed(selections):  
+            ip = self.list_blk.get(index)
+            subprocess.run(["sudo", "iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"])
+            self.blocked_ips.discard(ip)
+            self.list_blk.delete(index)
+
+root = tk.Tk()
+app = NetWatcher(root)
+root.mainloop()
